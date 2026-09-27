@@ -8,16 +8,20 @@ using Debug = UnityEngine.Debug;
 
 /*
  * ProceduralDungeonPrototype.cs
- * Controls: WASD / Arrow Keys to move, R to regenerate, T to run 100 dungeon evaluation tests.
+ * Controls:
+ * - WASD / Arrow Keys = Move
+ * - R = Regenerate dungeon
+ * - T = Run batch evaluation
  *
  * This prototype demonstrates:
  * - Constructive room-based procedural dungeon generation
  * - Grid / graph representation of rooms
  * - Reachability validation using BFS
- * - Runtime Unity Tilemap rendering
- * - Player movement, enemies, loot, exit trigger
- * - Evaluation logging for validity, generation time, path length, variation, and fairness
+ * - Runtime Unity Tilemap rendering and wall collision
+ * - Player movement, enemies, loot, health, and exit trigger
+ * - Evaluation logging for validity, generation time, exit distance, branching, and variation
  */
+
 public class ProceduralDungeonPrototype : MonoBehaviour
 {
     [Header("Dungeon Generation")]
@@ -57,7 +61,10 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 
     private static readonly Vector2Int[] Directions =
     {
-        Vector2Int.up, Vector2Int.down, Vector2Int.left, Vector2Int.right
+        Vector2Int.up,
+        Vector2Int.down,
+        Vector2Int.left,
+        Vector2Int.right
     };
 
     private GameObject generatedRoot;
@@ -67,11 +74,15 @@ public class ProceduralDungeonPrototype : MonoBehaviour
     private Tile wallTile;
     private Sprite squareSprite;
     private Text debugText;
+
     private float nextDebugUiRefreshTime;
     private const float DebugUiRefreshInterval = 0.35f;
+
     private DungeonResult currentDungeon;
     private int generationNumber;
     private int collectedLoot;
+    private int spawnedEnemyCount;
+    private int spawnedLootCount;
     private bool playerReachedExit;
     private bool playerDefeated;
     private int currentPlayerHealth;
@@ -79,8 +90,7 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 
     private void Start()
     {
-        // Low-lag prototype settings: disable VSync override, target a higher frame rate,
-        // and make physics update at 60 Hz for more responsive movement.
+        // Low-lag prototype settings for smoother testing and recording.
         QualitySettings.vSyncCount = 0;
         Application.targetFrameRate = 120;
         Time.fixedDeltaTime = 1f / 60f;
@@ -157,9 +167,13 @@ public class ProceduralDungeonPrototype : MonoBehaviour
     public void GenerateAndBuildDungeon()
     {
         int seed = useRandomSeed ? UnityEngine.Random.Range(1, int.MaxValue) : fixedSeed + generationNumber;
+
         currentDungeon = GenerateDungeonData(seed);
         generationNumber++;
+
         collectedLoot = 0;
+        spawnedEnemyCount = 0;
+        spawnedLootCount = 0;
         playerReachedExit = false;
         playerDefeated = false;
         currentPlayerHealth = maxPlayerHealth;
@@ -171,26 +185,39 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         PositionCamera(currentDungeon);
         RefreshDebugText();
 
-        Debug.Log($"Generated dungeon #{generationNumber}: seed={seed}, rooms={currentDungeon.rooms.Count}, valid={currentDungeon.valid}, exitDistance={currentDungeon.exitDistance}, generationMs={currentDungeon.generationMs:F3}");
+        Debug.Log(
+            $"Generated dungeon #{generationNumber}: " +
+            $"seed={seed}, " +
+            $"rooms={currentDungeon.rooms.Count}, " +
+            $"valid={currentDungeon.valid}, " +
+            $"exitDistance={currentDungeon.exitDistance}, " +
+            $"generationMs={currentDungeon.generationMs:F3}"
+        );
     }
-   
+
     private DungeonResult GenerateDungeonData(int seed)
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
         System.Random rng = new System.Random(seed);
 
-        DungeonResult result = new DungeonResult();
-        result.seed = seed;
-        result.startIndex = 0;
-        result.rooms = new List<RoomNode>();
+        DungeonResult result = new DungeonResult
+        {
+            seed = seed,
+            startIndex = 0,
+            rooms = new List<RoomNode>()
+        };
 
         Dictionary<Vector2Int, int> indexByPosition = new Dictionary<Vector2Int, int>();
 
         int AddRoom(Vector2Int gridPosition)
         {
-            RoomNode room = new RoomNode();
-            room.gridPosition = gridPosition;
+            RoomNode room = new RoomNode
+            {
+                gridPosition = gridPosition
+            };
+
             result.rooms.Add(room);
+
             int index = result.rooms.Count - 1;
             indexByPosition[gridPosition] = index;
             return index;
@@ -198,7 +225,11 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 
         void ConnectRooms(int a, int b)
         {
-            if (a == b) return;
+            if (a == b)
+            {
+                return;
+            }
+
             result.rooms[a].connections.Add(b);
             result.rooms[b].connections.Add(a);
         }
@@ -211,23 +242,26 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         while (result.rooms.Count < targetRoomCount && attempts < maxAttempts)
         {
             attempts++;
+
             int fromIndex = rng.Next(result.rooms.Count);
             RoomNode fromRoom = result.rooms[fromIndex];
+
             Vector2Int direction = Directions[rng.Next(Directions.Length)];
             Vector2Int newGridPosition = fromRoom.gridPosition + direction;
 
-            if (Mathf.Abs(newGridPosition.x) > gridRadius || Mathf.Abs(newGridPosition.y) > gridRadius)
+            if (Mathf.Abs(newGridPosition.x) > gridRadius ||
+                Mathf.Abs(newGridPosition.y) > gridRadius)
             {
                 continue;
             }
 
             if (indexByPosition.TryGetValue(newGridPosition, out int existingIndex))
             {
-               
                 if (rng.NextDouble() < extraLoopChance)
                 {
                     ConnectRooms(fromIndex, existingIndex);
                 }
+
                 continue;
             }
 
@@ -236,6 +270,7 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         }
 
         int[] distances = CalculateDistances(result.rooms, result.startIndex);
+
         for (int i = 0; i < result.rooms.Count; i++)
         {
             result.rooms[i].distanceFromStart = distances[i];
@@ -244,12 +279,18 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         result.exitIndex = SelectExitRoom(result.rooms, distances, rng);
         result.exitDistance = distances[result.exitIndex];
         result.branchCount = CountBranches(result.rooms);
-        result.valid = IsReachable(result.rooms, result.startIndex, result.exitIndex)
-                       && result.rooms.Count >= Mathf.Max(6, targetRoomCount / 2)
-                       && result.exitDistance >= Mathf.Min(minimumExitDistance, Mathf.Max(1, result.rooms.Count / 4));
+
+        result.valid =
+            IsReachable(result.rooms, result.startIndex, result.exitIndex) &&
+            result.rooms.Count >= Mathf.Max(6, targetRoomCount / 2) &&
+            result.exitDistance >= Mathf.Min(
+                minimumExitDistance,
+                Mathf.Max(1, result.rooms.Count / 4)
+            );
 
         stopwatch.Stop();
         result.generationMs = stopwatch.Elapsed.TotalMilliseconds;
+
         return result;
     }
 
@@ -260,7 +301,10 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 
         for (int i = 0; i < rooms.Count; i++)
         {
-            if (i == 0 || distances[i] < 0) continue;
+            if (i == 0 || distances[i] < 0)
+            {
+                continue;
+            }
 
             if (distances[i] > bestDistance)
             {
@@ -274,14 +318,22 @@ public class ProceduralDungeonPrototype : MonoBehaviour
             }
         }
 
-        if (candidates.Count == 0) return 0;
+        if (candidates.Count == 0)
+        {
+            return 0;
+        }
+
         return candidates[rng.Next(candidates.Count)];
     }
 
     private int[] CalculateDistances(List<RoomNode> rooms, int startIndex)
     {
         int[] distances = new int[rooms.Count];
-        for (int i = 0; i < distances.Length; i++) distances[i] = -1;
+
+        for (int i = 0; i < distances.Length; i++)
+        {
+            distances[i] = -1;
+        }
 
         Queue<int> queue = new Queue<int>();
         distances[startIndex] = 0;
@@ -290,9 +342,14 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         while (queue.Count > 0)
         {
             int current = queue.Dequeue();
+
             foreach (int neighbour in rooms[current].connections)
             {
-                if (distances[neighbour] >= 0) continue;
+                if (distances[neighbour] >= 0)
+                {
+                    continue;
+                }
+
                 distances[neighbour] = distances[current] + 1;
                 queue.Enqueue(neighbour);
             }
@@ -304,16 +361,23 @@ public class ProceduralDungeonPrototype : MonoBehaviour
     private bool IsReachable(List<RoomNode> rooms, int startIndex, int exitIndex)
     {
         int[] distances = CalculateDistances(rooms, startIndex);
-        return exitIndex >= 0 && exitIndex < distances.Length && distances[exitIndex] >= 0;
+        return exitIndex >= 0 &&
+               exitIndex < distances.Length &&
+               distances[exitIndex] >= 0;
     }
 
     private int CountBranches(List<RoomNode> rooms)
     {
         int branchCount = 0;
-        for (int i = 0; i < rooms.Count; i++)
+
+        foreach (RoomNode room in rooms)
         {
-            if (rooms[i].connections.Count >= 3) branchCount++;
+            if (room.connections.Count >= 3)
+            {
+                branchCount++;
+            }
         }
+
         return branchCount;
     }
 
@@ -355,8 +419,16 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         {
             foreach (int connectedIndex in dungeon.rooms[i].connections)
             {
-                if (connectedIndex <= i) continue;
-                AddCorridorFloorCells(floorCells, GetRoomCentreCell(dungeon.rooms[i].gridPosition), GetRoomCentreCell(dungeon.rooms[connectedIndex].gridPosition));
+                if (connectedIndex <= i)
+                {
+                    continue;
+                }
+
+                AddCorridorFloorCells(
+                    floorCells,
+                    GetRoomCentreCell(dungeon.rooms[i].gridPosition),
+                    GetRoomCentreCell(dungeon.rooms[connectedIndex].gridPosition)
+                );
             }
         }
 
@@ -369,6 +441,7 @@ public class ProceduralDungeonPrototype : MonoBehaviour
                 for (int y = -1; y <= 1; y++)
                 {
                     Vector3Int neighbour = new Vector3Int(floor.x + x, floor.y + y, 0);
+
                     if (!floorCells.Contains(neighbour))
                     {
                         wallCells.Add(neighbour);
@@ -407,6 +480,7 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 
         int minX = Mathf.Min(from.x, to.x);
         int maxX = Mathf.Max(from.x, to.x);
+
         for (int x = minX; x <= maxX; x++)
         {
             for (int offset = -halfThickness; offset <= halfThickness; offset++)
@@ -417,6 +491,7 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 
         int minY = Mathf.Min(from.y, to.y);
         int maxY = Mathf.Max(from.y, to.y);
+
         for (int y = minY; y <= maxY; y++)
         {
             for (int offset = -halfThickness; offset <= halfThickness; offset++)
@@ -463,6 +538,7 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         body.collisionDetectionMode = CollisionDetectionMode2D.Continuous;
         body.interpolation = RigidbodyInterpolation2D.Interpolate;
         body.sleepMode = RigidbodySleepMode2D.NeverSleep;
+
         BoxCollider2D collider = player.AddComponent<BoxCollider2D>();
         collider.size = Vector2.one * 0.72f;
 
@@ -470,7 +546,12 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         mover.speed = playerMoveSpeed;
 
         CameraFollow follow = Camera.main.gameObject.GetComponent<CameraFollow>();
-        if (follow == null) follow = Camera.main.gameObject.AddComponent<CameraFollow>();
+
+        if (follow == null)
+        {
+            follow = Camera.main.gameObject.AddComponent<CameraFollow>();
+        }
+
         follow.target = player.transform;
     }
 
@@ -478,8 +559,10 @@ public class ProceduralDungeonPrototype : MonoBehaviour
     {
         Vector3 exitPosition = GetRoomWorldCentre(dungeon.rooms[dungeon.exitIndex]);
         GameObject exit = CreateColouredObject("Exit", exitColor, exitPosition, 1f, parent);
+
         BoxCollider2D trigger = exit.AddComponent<BoxCollider2D>();
         trigger.isTrigger = true;
+
         ExitTrigger exitTrigger = exit.AddComponent<ExitTrigger>();
         exitTrigger.prototype = this;
     }
@@ -487,49 +570,144 @@ public class ProceduralDungeonPrototype : MonoBehaviour
     private void SpawnEnemiesAndLoot(DungeonResult dungeon, Transform parent)
     {
         System.Random rng = new System.Random(dungeon.seed + 999);
+
         List<int> validEnemyRooms = new List<int>();
         List<int> validLootRooms = new List<int>();
 
         for (int i = 0; i < dungeon.rooms.Count; i++)
         {
-            if (i == dungeon.startIndex || i == dungeon.exitIndex) continue;
+            if (i == dungeon.startIndex || i == dungeon.exitIndex)
+            {
+                continue;
+            }
 
-            if (dungeon.rooms[i].distanceFromStart >= minimumEnemyDistanceFromStart)
+            int distance = dungeon.rooms[i].distanceFromStart;
+
+            // Enemies should not appear too close to the start room.
+            if (distance >= minimumEnemyDistanceFromStart)
             {
                 validEnemyRooms.Add(i);
             }
 
-            if (dungeon.rooms[i].distanceFromStart >= 1)
+            // Loot can appear earlier than enemies, but only in reachable rooms.
+            if (distance >= 1)
             {
                 validLootRooms.Add(i);
             }
         }
 
-        Shuffle(validEnemyRooms, rng);
-        Shuffle(validLootRooms, rng);
+        List<int> selectedEnemyRooms = SelectWeightedUniqueRooms(
+            validEnemyRooms,
+            dungeon,
+            rng,
+            Mathf.Min(enemyCount, validEnemyRooms.Count),
+            favourDistance: true,
+            favourBranchesOrDeadEnds: false
+        );
 
-        int enemiesToSpawn = Mathf.Min(enemyCount, validEnemyRooms.Count);
-        for (int i = 0; i < enemiesToSpawn; i++)
+        List<int> selectedLootRooms = SelectWeightedUniqueRooms(
+            validLootRooms,
+            dungeon,
+            rng,
+            Mathf.Min(lootCount, validLootRooms.Count),
+            favourDistance: false,
+            favourBranchesOrDeadEnds: true
+        );
+
+        spawnedEnemyCount = selectedEnemyRooms.Count;
+        spawnedLootCount = selectedLootRooms.Count;
+
+        foreach (int roomIndex in selectedEnemyRooms)
         {
-            Vector3 enemyPosition = GetRoomWorldCentre(dungeon.rooms[validEnemyRooms[i]]) + RandomOffsetInRoom(rng, 2f);
+            Vector3 enemyPosition =
+                GetRoomWorldCentre(dungeon.rooms[roomIndex]) +
+                RandomOffsetInRoom(rng, 2f);
+
             GameObject enemy = CreateColouredObject("Enemy", enemyColor, enemyPosition, 0.7f, parent);
+
             BoxCollider2D trigger = enemy.AddComponent<BoxCollider2D>();
             trigger.isTrigger = true;
+
             EnemyPatrol patrol = enemy.AddComponent<EnemyPatrol>();
             patrol.origin = enemyPosition;
             patrol.prototype = this;
         }
 
-        int lootToSpawn = Mathf.Min(lootCount, validLootRooms.Count);
-        for (int i = 0; i < lootToSpawn; i++)
+        foreach (int roomIndex in selectedLootRooms)
         {
-            Vector3 lootPosition = GetRoomWorldCentre(dungeon.rooms[validLootRooms[i]]) + RandomOffsetInRoom(rng, 2.2f);
+            Vector3 lootPosition =
+                GetRoomWorldCentre(dungeon.rooms[roomIndex]) +
+                RandomOffsetInRoom(rng, 2.2f);
+
             GameObject loot = CreateColouredObject("Loot", lootColor, lootPosition, 0.55f, parent);
+
             BoxCollider2D trigger = loot.AddComponent<BoxCollider2D>();
             trigger.isTrigger = true;
+
             LootPickup pickup = loot.AddComponent<LootPickup>();
             pickup.prototype = this;
         }
+    }
+
+    private List<int> SelectWeightedUniqueRooms(
+        List<int> candidateRooms,
+        DungeonResult dungeon,
+        System.Random rng,
+        int count,
+        bool favourDistance,
+        bool favourBranchesOrDeadEnds)
+    {
+        List<int> weightedRooms = new List<int>();
+
+        foreach (int roomIndex in candidateRooms)
+        {
+            RoomNode room = dungeon.rooms[roomIndex];
+            int weight = 1;
+
+            if (favourDistance)
+            {
+                weight += Mathf.Clamp(room.distanceFromStart, 0, 5);
+            }
+
+            if (favourBranchesOrDeadEnds)
+            {
+                bool isBranchRoom = room.connections.Count >= 3;
+                bool isDeadEndAwayFromStart = room.connections.Count == 1 && room.distanceFromStart >= 2;
+
+                if (isBranchRoom || isDeadEndAwayFromStart)
+                {
+                    weight += 3;
+                }
+            }
+
+            for (int i = 0; i < weight; i++)
+            {
+                weightedRooms.Add(roomIndex);
+            }
+        }
+
+        Shuffle(weightedRooms, rng);
+
+        List<int> selectedRooms = new List<int>();
+        HashSet<int> usedRooms = new HashSet<int>();
+
+        foreach (int roomIndex in weightedRooms)
+        {
+            if (usedRooms.Contains(roomIndex))
+            {
+                continue;
+            }
+
+            selectedRooms.Add(roomIndex);
+            usedRooms.Add(roomIndex);
+
+            if (selectedRooms.Count >= count)
+            {
+                break;
+            }
+        }
+
+        return selectedRooms;
     }
 
     private Vector3 RandomOffsetInRoom(System.Random rng, float maxDistance)
@@ -550,7 +728,12 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         }
     }
 
-    private GameObject CreateColouredObject(string objectName, Color color, Vector3 position, float scale, Transform parent)
+    private GameObject CreateColouredObject(
+        string objectName,
+        Color color,
+        Vector3 position,
+        float scale,
+        Transform parent)
     {
         GameObject obj = new GameObject(objectName);
         obj.transform.SetParent(parent);
@@ -561,6 +744,7 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         renderer.sprite = squareSprite;
         renderer.color = color;
         renderer.sortingOrder = 10;
+
         return obj;
     }
 
@@ -571,10 +755,12 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         floorTile = ScriptableObject.CreateInstance<Tile>();
         floorTile.sprite = CreateSquareSprite(floorColor);
         floorTile.color = Color.white;
+        floorTile.colliderType = Tile.ColliderType.None;
 
         wallTile = ScriptableObject.CreateInstance<Tile>();
         wallTile.sprite = CreateSquareSprite(wallColor);
         wallTile.color = Color.white;
+        wallTile.colliderType = Tile.ColliderType.Grid;
     }
 
     private Sprite CreateSquareSprite(Color color)
@@ -583,7 +769,13 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         texture.SetPixel(0, 0, color);
         texture.filterMode = FilterMode.Point;
         texture.Apply();
-        return Sprite.Create(texture, new Rect(0, 0, 1, 1), new Vector2(0.5f, 0.5f), 1f);
+
+        return Sprite.Create(
+            texture,
+            new Rect(0, 0, 1, 1),
+            new Vector2(0.5f, 0.5f),
+            1f
+        );
     }
 
     private void PositionCamera(DungeonResult dungeon)
@@ -592,17 +784,22 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 
         Camera.main.orthographic = true;
         Camera.main.orthographicSize = 9f;
-        Camera.main.transform.position = GetRoomWorldCentre(dungeon.rooms[dungeon.startIndex]) + new Vector3(0, 0, -10f);
+        Camera.main.transform.position =
+            GetRoomWorldCentre(dungeon.rooms[dungeon.startIndex]) +
+            new Vector3(0, 0, -10f);
     }
-
 
     private void EnsureCameraExists()
     {
-        if (Camera.main != null) return;
+        if (Camera.main != null)
+        {
+            return;
+        }
 
         GameObject cameraObject = new GameObject("Main Camera");
         Camera camera = cameraObject.AddComponent<Camera>();
         camera.orthographic = true;
+
         cameraObject.tag = "MainCamera";
         cameraObject.transform.position = new Vector3(0, 0, -10f);
     }
@@ -615,8 +812,10 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         if (existingCanvas == null)
         {
             canvasObject = new GameObject("Prototype UI Canvas");
+
             Canvas canvas = canvasObject.AddComponent<Canvas>();
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+
             canvasObject.AddComponent<GraphicRaycaster>();
         }
         else
@@ -625,6 +824,7 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         }
 
         CanvasScaler scaler = canvasObject.GetComponent<CanvasScaler>();
+
         if (scaler == null)
         {
             scaler = canvasObject.AddComponent<CanvasScaler>();
@@ -659,27 +859,34 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         rect.sizeDelta = new Vector2(1050, 420);
     }
 
-
     private Font GetBuiltInUIFont()
     {
         try
         {
             Font font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-            if (font != null) return font;
+
+            if (font != null)
+            {
+                return font;
+            }
         }
         catch (Exception)
         {
-            // Ignore and try older fallback below.
+            // Try the fallback below.
         }
 
         try
         {
             Font font = Resources.GetBuiltinResource<Font>("Arial.ttf");
-            if (font != null) return font;
+
+            if (font != null)
+            {
+                return font;
+            }
         }
         catch (Exception)
         {
-            // Ignore and try operating system font fallback below.
+            // Try operating system fallback below.
         }
 
         try
@@ -694,9 +901,17 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 
     private void RefreshDebugText()
     {
-        if (debugText == null || currentDungeon == null) return;
+        if (debugText == null || currentDungeon == null)
+        {
+            return;
+        }
 
-        string status = playerDefeated ? "DEFEATED" : playerReachedExit ? "EXIT REACHED" : "Exploring";
+        string status = playerDefeated
+            ? "DEFEATED"
+            : playerReachedExit
+                ? "EXIT REACHED"
+                : "Exploring";
+
         debugText.text =
             "Procedural Dungeon Prototype - Unity/C#\n" +
             "Controls: WASD/Arrow Keys = Move | R = Regenerate | T = Run 100-test evaluation\n\n" +
@@ -706,16 +921,24 @@ public class ProceduralDungeonPrototype : MonoBehaviour
             $"Valid: {currentDungeon.valid} | Exit Reachable: {currentDungeon.exitDistance >= 0}\n" +
             $"Start-to-Exit Distance: {currentDungeon.exitDistance} rooms\n" +
             $"Generation Time: {currentDungeon.generationMs:F3} ms\n" +
-            $"Enemies: {enemyCount} | Loot Collected: {collectedLoot}/{Mathf.Min(lootCount, Mathf.Max(0, currentDungeon.rooms.Count - 2))}\n" +
+            $"Enemies: {spawnedEnemyCount} | Loot Collected: {collectedLoot}/{spawnedLootCount}\n" +
             $"Player Health: {currentPlayerHealth}/{maxPlayerHealth}";
     }
 
     private void ClearGeneratedObjects()
     {
-        if (generatedRoot != null)
+        if (generatedRoot == null)
         {
-            if (Application.isPlaying) Destroy(generatedRoot);
-            else DestroyImmediate(generatedRoot);
+            return;
+        }
+
+        if (Application.isPlaying)
+        {
+            Destroy(generatedRoot);
+        }
+        else
+        {
+            DestroyImmediate(generatedRoot);
         }
     }
 
@@ -728,7 +951,11 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 
     public void RegisterExitReached()
     {
-        if (playerReachedExit) return;
+        if (playerReachedExit)
+        {
+            return;
+        }
+
         playerReachedExit = true;
         Debug.Log("Player reached the exit. Prototype success condition achieved.");
         RefreshDebugText();
@@ -736,7 +963,10 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 
     public void RegisterPlayerHit()
     {
-        if (playerReachedExit || playerDefeated) return;
+        if (playerReachedExit || playerDefeated)
+        {
+            return;
+        }
 
         if (Time.time < nextEnemyDamageTime)
         {
@@ -774,20 +1004,35 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 
         for (int i = 0; i < batchTestCount; i++)
         {
-            int seed = useRandomSeed ? UnityEngine.Random.Range(1, int.MaxValue) : fixedSeed + 100000 + i;
+            int seed = useRandomSeed
+                ? UnityEngine.Random.Range(1, int.MaxValue)
+                : fixedSeed + 100000 + i;
+
             DungeonResult result = GenerateDungeonData(seed);
 
-            if (result.valid) validCount++;
+            if (result.valid)
+            {
+                validCount++;
+            }
+
             totalMs += result.generationMs;
             totalRooms += result.rooms.Count;
             totalExitDistance += result.exitDistance;
             totalBranches += result.branchCount;
+
             minExitDistanceObserved = Mathf.Min(minExitDistanceObserved, result.exitDistance);
             maxExitDistanceObserved = Mathf.Max(maxExitDistanceObserved, result.exitDistance);
 
             if (printCsvRowsToConsole)
             {
-                Debug.Log($"{result.seed},{result.valid},{result.rooms.Count},{result.exitDistance},{result.branchCount},{result.generationMs:F3}");
+                Debug.Log(
+                    $"{result.seed}," +
+                    $"{result.valid}," +
+                    $"{result.rooms.Count}," +
+                    $"{result.exitDistance}," +
+                    $"{result.branchCount}," +
+                    $"{result.generationMs:F3}"
+                );
             }
         }
 
@@ -797,17 +1042,16 @@ public class ProceduralDungeonPrototype : MonoBehaviour
         float averageExitDistance = (float)totalExitDistance / Mathf.Max(1, batchTestCount);
         float averageBranches = (float)totalBranches / Mathf.Max(1, batchTestCount);
 
-        Debug.Log(
-            "BATCH EVALUATION SUMMARY\n" +
-            $"Tests: {batchTestCount}\n" +
-            $"Valid Dungeon Rate: {validCount}/{batchTestCount} = {validityRate:F1}%\n" +
-            $"Average Generation Time: {averageMs:F3} ms\n" +
-            $"Average Room Count: {averageRooms:F2}\n" +
-            $"Average Exit Distance: {averageExitDistance:F2} rooms\n" +
-            $"Exit Distance Range: {minExitDistanceObserved} to {maxExitDistanceObserved} rooms\n" +
-            $"Average Branch Rooms: {averageBranches:F2}\n" +
-            "Use these values in Chapter 4 under prototype evaluation."
-        );
+        Debug.Log("========== BATCH EVALUATION SUMMARY ==========");
+        Debug.Log($"Tests: {batchTestCount}");
+        Debug.Log($"Valid Dungeon Rate: {validCount}/{batchTestCount} = {validityRate:F1}%");
+        Debug.Log($"Average Generation Time: {averageMs:F3} ms");
+        Debug.Log($"Average Room Count: {averageRooms:F2}");
+        Debug.Log($"Average Exit Distance: {averageExitDistance:F2} rooms");
+        Debug.Log($"Exit Distance Range: {minExitDistanceObserved} to {maxExitDistanceObserved} rooms");
+        Debug.Log($"Average Branch Rooms: {averageBranches:F2}");
+        Debug.Log("Use these values in Chapter 5 under technical evaluation.");
+        Debug.Log("==============================================");
     }
 
     private class RoomNode
@@ -833,12 +1077,14 @@ public class ProceduralDungeonPrototype : MonoBehaviour
 public class PlayerMover : MonoBehaviour
 {
     public float speed = 5f;
+
     private Rigidbody2D body;
     private Vector2 input;
 
     private void Awake()
     {
         body = GetComponent<Rigidbody2D>();
+
         if (body != null)
         {
             body.gravityScale = 0f;
@@ -854,8 +1100,12 @@ public class PlayerMover : MonoBehaviour
         input = input.sqrMagnitude > 1f ? input.normalized : input;
 
         // Apply velocity immediately in Update as well as FixedUpdate.
-        // This makes the prototype feel responsive in the Unity Editor,
-        // especially when the Editor frame rate is unstable.
+        // This helps movement feel responsive in the Unity Editor.
+        ApplyVelocity();
+    }
+
+    private void FixedUpdate()
+    {
         ApplyVelocity();
     }
 
@@ -865,6 +1115,7 @@ public class PlayerMover : MonoBehaviour
 
 #if ENABLE_INPUT_SYSTEM
         UnityEngine.InputSystem.Keyboard keyboard = UnityEngine.InputSystem.Keyboard.current;
+
         if (keyboard != null)
         {
             if (keyboard.aKey.isPressed || keyboard.leftArrowKey.isPressed) movement.x -= 1f;
@@ -884,14 +1135,13 @@ public class PlayerMover : MonoBehaviour
         return movement;
     }
 
-    private void FixedUpdate()
-    {
-        ApplyVelocity();
-    }
-
     private void ApplyVelocity()
     {
-        if (body == null) return;
+        if (body == null)
+        {
+            return;
+        }
+
         body.linearVelocity = input * speed;
     }
 }
@@ -904,18 +1154,24 @@ public class CameraFollow : MonoBehaviour
 
     private void LateUpdate()
     {
-        if (target == null) return;
+        if (target == null)
+        {
+            return;
+        }
+
         Vector3 targetPosition = new Vector3(target.position.x, target.position.y, -10f);
 
-        // Snapping removes the delayed-camera feeling during testing.
-        // Set snapToPlayer to false in the Inspector if you want a smoother camera later.
         if (snapToPlayer)
         {
             transform.position = targetPosition;
         }
         else
         {
-            transform.position = Vector3.Lerp(transform.position, targetPosition, Time.deltaTime * smoothSpeed);
+            transform.position = Vector3.Lerp(
+                transform.position,
+                targetPosition,
+                Time.deltaTime * smoothSpeed
+            );
         }
     }
 }
@@ -950,7 +1206,10 @@ public class EnemyPatrol : MonoBehaviour
 
     private void TryDamagePlayer(Collider2D other)
     {
-        if (other.GetComponent<PlayerMover>() == null) return;
+        if (other.GetComponent<PlayerMover>() == null)
+        {
+            return;
+        }
 
         if (prototype != null)
         {
@@ -965,8 +1224,15 @@ public class LootPickup : MonoBehaviour
 
     private void OnTriggerEnter2D(Collider2D other)
     {
-        if (other.GetComponent<PlayerMover>() == null) return;
-        if (prototype != null) prototype.RegisterLootCollected(gameObject);
+        if (other.GetComponent<PlayerMover>() == null)
+        {
+            return;
+        }
+
+        if (prototype != null)
+        {
+            prototype.RegisterLootCollected(gameObject);
+        }
     }
 }
 
@@ -976,7 +1242,14 @@ public class ExitTrigger : MonoBehaviour
 
     private void OnTriggerEnter2D(Collider2D other)
     {
-        if (other.GetComponent<PlayerMover>() == null) return;
-        if (prototype != null) prototype.RegisterExitReached();
+        if (other.GetComponent<PlayerMover>() == null)
+        {
+            return;
+        }
+
+        if (prototype != null)
+        {
+            prototype.RegisterExitReached();
+        }
     }
 }
