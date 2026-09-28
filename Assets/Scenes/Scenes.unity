@@ -299,7 +299,7 @@ MonoBehaviour:
   enemyDamageCooldown: 1
   batchTestCount: 100
   runBatchTestOnStart: 0
-  printCsvRowsToConsole: 1
+  printCsvRowsToConsole: 0
   useRandomSeed: 1
   fixedSeed: 12345
   floorColor: {r: 0.24, g: 0.24, b: 0.28, a: 1}
